@@ -1,10 +1,13 @@
 {
   "name": "ml-bot",
-  "scripts": { "start": "node server.js" },
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "pg": "^8.11.5",
     "node-fetch": "^3.3.2",
-    "dotenv": "^16.4.5"
+    "pg": "^8.11.5"
   }
 }
