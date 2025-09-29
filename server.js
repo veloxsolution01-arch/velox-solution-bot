@@ -2,16 +2,26 @@ import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
 import pg from 'pg';
+import dns from 'node:dns';
+
+// 🔧 força IPv4 primeiro (evita ENETUNREACH em alguns provedores)
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 app.use(express.json());
 
 // ========= DB (Supabase) =========
-// força SSL para conexões externas
+// OBS: garanta que DATABASE_URL tem ?sslmode=require
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+// teste rápido de conexão ao subir
+pool
+  .query('select 1')
+  .then(() => console.log('✅ DB ok'))
+  .catch(e => console.error('❌ DB erro:', e.message));
 
 // ========= Helpers ML =========
 async function oauthRefresh(ml_user_id) {
@@ -35,7 +45,7 @@ async function oauthRefresh(ml_user_id) {
     body
   }).then(r => r.json());
 
-  if (!tok.access_token) throw new Error('Falha no refresh_token');
+  if (!tok.access_token) throw new Error('Falha no refresh_token: ' + JSON.stringify(tok));
 
   const expiresAt = new Date(Date.now() + (tok.expires_in || 21600) * 1000);
   await pool.query(`
@@ -90,10 +100,10 @@ app.get('/ml/connect', (req, res) => {
 
   if (!clientId || !redirectUri) {
     console.error('ENV faltando em /ml/connect', { clientId: !!clientId, redirectUri: !!redirectUri });
-    return res.status(500).send('⚠️ Defina ML_CLIENT_ID e ML_REDIRECT_URI nas variáveis do Render.');
+    return res.status(500).send('⚠️ Defina ML_CLIENT_ID e ML_REDIRECT_URI no Render.');
   }
 
-  const auth = new URL('https://auth.mercadolivre.com.br/authorization');
+  const auth = new URL('https://auth.mercadolivre.com.br/authorization'); // <- mercadolivre (com VRE)
   auth.searchParams.set('response_type', 'code');
   auth.searchParams.set('client_id', clientId);
   auth.searchParams.set('redirect_uri', redirectUri);
@@ -104,6 +114,14 @@ app.get('/ml/connect', (req, res) => {
 
 app.get('/ml/callback', async (req, res) => {
   try {
+    console.log('📥 Query no callback:', req.query);
+
+    if (req.query.error) {
+      return res
+        .status(400)
+        .send(`Erro do OAuth (na autorização): ${req.query.error_description || req.query.error}`);
+    }
+
     const { code } = req.query;
     if (!code) return res.status(400).send('Faltou "code" do OAuth');
 
@@ -115,42 +133,41 @@ app.get('/ml/callback', async (req, res) => {
       redirect_uri: process.env.ML_REDIRECT_URI
     });
 
-    const tok = await fetch('https://api.mercadolibre.com/oauth/token', {
+    const resp = await fetch('https://api.mercadolibre.com/oauth/token', {
       method: 'POST',
-      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body
-    }).then(r => r.json());
+    });
 
-    if (!tok.access_token) {
-      console.error('OAuth token error:', tok);
-      return res.status(400).send('Falha ao obter access_token do ML');
+    const tok = await resp.json();
+    console.log('🔎 Resposta do /oauth/token:', tok);
+
+    if (!resp.ok || !tok.access_token) {
+      return res
+        .status(400)
+        .send(`Erro no OAuth (na troca do code): ${tok.error || resp.status} - ${tok.error_description || JSON.stringify(tok)}`);
     }
 
+    // pega dados da conta
     const me = await fetch('https://api.mercadolibre.com/users/me', {
-      headers: { 'Authorization': `Bearer ${tok.access_token}` }
+      headers: { Authorization: `Bearer ${tok.access_token}` }
     }).then(r => r.json());
 
-    // garante tabela shops (caso não tenha criado)
+    // cria tabelas se não existirem
     await pool.query(`
       create table if not exists shops (
-        id bigserial primary key,
-        ml_user_id bigint unique not null,
-        nickname text,
-        created_at timestamptz default now()
-      );
-    `);
-
-    await pool.query(`
-      create table if not exists tokens (
         ml_user_id bigint primary key,
+        nickname text,
+        created_at timestamptz default now(),
+        updated_at timestamptz default now()
+      );
+      create table if not exists tokens (
+        ml_user_id bigint primary key references shops(ml_user_id) on delete cascade,
         access_token text not null,
         refresh_token text not null,
         expires_at timestamptz not null,
         updated_at timestamptz default now()
       );
-    `);
-
-    await pool.query(`
       create table if not exists answers (
         question_id bigint primary key,
         final text,
@@ -163,7 +180,7 @@ app.get('/ml/callback', async (req, res) => {
 
     await pool.query(`
       insert into shops (ml_user_id, nickname) values ($1, $2)
-      on conflict (ml_user_id) do update set nickname = excluded.nickname
+      on conflict (ml_user_id) do update set nickname = excluded.nickname, updated_at = now()
     `, [me.id, me.nickname]);
 
     await pool.query(`
@@ -179,7 +196,7 @@ app.get('/ml/callback', async (req, res) => {
     res.send('Conectado! Pode fechar a aba.');
   } catch (e) {
     console.error('OAuth callback error:', e);
-    res.status(500).send('Erro no OAuth');
+    res.status(500).send('Erro no OAuth (exceção). Veja logs do Render.');
   }
 });
 
@@ -274,4 +291,3 @@ Pergunta: ${ctx.question}`;
 // ========= Start =========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`on ${PORT}`));
-
