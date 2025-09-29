@@ -2,6 +2,23 @@ import 'dotenv/config';
 import express from 'express';
 import fetch from 'node-fetch';
 import pg from 'pg';
+import dns from 'node:dns';
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, // EX: postgres://postgres:SUA_SENHA.@db.tjkbme...:5432/postgres?sslmode=require
+  ssl: { rejectUnauthorized: false },
+  keepAlive: true,
+  connectionTimeoutMillis: 10000
+});
+
+
+// 🔧 força IPv4 (evita tentar IPv6 -> ENETUNREACH no Render)
+dns.setDefaultResultOrder?.('ipv4first');
+
+import 'dotenv/config';
+import express from 'express';
+import fetch from 'node-fetch';
+import pg from 'pg';
 
 const app = express();
 app.use(express.json());
@@ -145,4 +162,5 @@ Responda curto (1–2 frases), sem oferecer contato fora do ML.`;
 app.listen(process.env.PORT || 3000, () => {
   console.log("🚀 Server rodando na porta", process.env.PORT || 3000);
 });
+
 
