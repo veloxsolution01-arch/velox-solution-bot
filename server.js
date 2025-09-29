@@ -93,7 +93,7 @@ app.get('/ml/connect', (req, res) => {
     return res.status(500).send('⚠️ Defina ML_CLIENT_ID e ML_REDIRECT_URI nas variáveis do Render.');
   }
 
-  const auth = new URL('https://auth.mercadolibre.com.br/authorization');
+  const auth = new URL('https://auth.mercadolivre.com.br/authorization');
   auth.searchParams.set('response_type', 'code');
   auth.searchParams.set('client_id', clientId);
   auth.searchParams.set('redirect_uri', redirectUri);
@@ -274,3 +274,4 @@ Pergunta: ${ctx.question}`;
 // ========= Start =========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`on ${PORT}`));
+
