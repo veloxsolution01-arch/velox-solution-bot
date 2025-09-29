@@ -3,43 +3,25 @@ import express from 'express';
 import fetch from 'node-fetch';
 import pg from 'pg';
 import dns from 'node:dns';
-import { URL } from 'node:url';
 
 const app = express();
 app.use(express.json());
 
-// --------- Util: força IPv4 em lookups padrão (belt & suspenders)
+// 🔧 Preferir IPv4 (evita tentativa de IPv6 que dá ENETUNREACH em alguns providers)
 dns.setDefaultResultOrder?.('ipv4first');
 
-// --------- Pool do Postgres (forçando IPv4 do host da DATABASE_URL)
-let pool;
+// ========= DB (Supabase) =========
+// Use SOMENTE a connectionString; não faça lookup manual de DNS aqui.
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL, // inclua ?sslmode=require na env
+  ssl: { rejectUnauthorized: false }
+});
 
-async function initDbPool() {
-  // Lê a DATABASE_URL e quebra nos pedaços
-  const dbUrl = new URL(process.env.DATABASE_URL);
-  const host = dbUrl.hostname;                     // db.<ref>.supabase.co
-  const port = Number(dbUrl.port || 5432);
-  const user = decodeURIComponent(dbUrl.username); // postgres
-  const password = decodeURIComponent(dbUrl.password); // sua senha (com ponto)
-  const database = dbUrl.pathname.replace(/^\//, '') || 'postgres';
-
-  // Resolve para IPv4 (A record)
-  const { address: ipv4 } = await dns.promises.lookup(host, { family: 4 });
-  console.log('🔎 Supabase host:', host, '→ IPv4:', ipv4);
-
-  pool = new pg.Pool({
-    host: ipv4,          // força IPv4
-    port,
-    user,
-    password,
-    database,
-    ssl: { rejectUnauthorized: false }
-  });
-
-  // Teste de conexão
-  await pool.query('select 1');
-  console.log('✅ DB ok');
-}
+// teste rápido de conexão ao subir
+pool
+  .query('select 1')
+  .then(() => console.log('✅ DB ok'))
+  .catch(e => console.error('❌ DB erro:', e.message));
 
 // ========= Helpers ML =========
 async function oauthRefresh(ml_user_id) {
@@ -121,7 +103,7 @@ app.get('/ml/connect', (req, res) => {
     return res.status(500).send('⚠️ Defina ML_CLIENT_ID e ML_REDIRECT_URI no Render.');
   }
 
-  const auth = new URL('https://auth.mercadolivre.com.br/authorization');
+  const auth = new URL('https://auth.mercadolivre.com.br/authorization'); // mercadolivre (com VRE)
   auth.searchParams.set('response_type', 'code');
   auth.searchParams.set('client_id', clientId);
   auth.searchParams.set('redirect_uri', redirectUri);
@@ -304,11 +286,6 @@ Pergunta: ${ctx.question}`;
     .slice(0, 900);
 }
 
-// --------- Inicialização: cria pool e só então sobe o server
+// ========= Start =========
 const PORT = process.env.PORT || 3000;
-initDbPool()
-  .then(() => app.listen(PORT, () => console.log(`on ${PORT}`)))
-  .catch((e) => {
-    console.error('❌ Falha ao iniciar DB:', e);
-    process.exit(1);
-  });
+app.listen(PORT, () => console.log(`on ${PORT}`));
