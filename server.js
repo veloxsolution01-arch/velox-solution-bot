@@ -6,13 +6,14 @@ import pg from 'pg';
 const app = express();
 app.use(express.json());
 
-// -------- DB (Supabase) - força SSL --------
+// ========= DB (Supabase) =========
+// força SSL para conexões externas
 const pool = new pg.Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ---------- Helpers Mercado Livre ----------
+// ========= Helpers ML =========
 async function oauthRefresh(ml_user_id) {
   const { rows } = await pool.query(
     'select refresh_token from tokens where ml_user_id = $1',
@@ -49,7 +50,6 @@ async function oauthRefresh(ml_user_id) {
   return tok.access_token;
 }
 
-// faz request e, se der 401, tenta refresh automático
 async function mlFetchWithAutoRefresh(url, ml_user_id, access_token, opts = {}) {
   const doFetch = async (token) => {
     const r = await fetch(`https://api.mercadolibre.com${url}`, {
@@ -75,21 +75,30 @@ async function mlFetchWithAutoRefresh(url, ml_user_id, access_token, opts = {}) 
   return res.json();
 }
 
-// sugar
 const mlGET  = (path, uid, token) => mlFetchWithAutoRefresh(path, uid, token);
 const mlPOST = (path, uid, token, bodyObj) =>
   mlFetchWithAutoRefresh(path, uid, token, { method:'POST', body: JSON.stringify(bodyObj) });
 
-// ------------- Rotas básicas ---------------
+// ========= Rotas básicas =========
 app.get('/', (_req, res) => res.send('🚀 Velox ML Bot no ar'));
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-// ------------- OAuth -----------------------
-app.get('/ml/connect', (_req, res) => {
+// ========= OAuth =========
+app.get('/ml/connect', (req, res) => {
+  const clientId = process.env.ML_CLIENT_ID;
+  const redirectUri = process.env.ML_REDIRECT_URI;
+
+  if (!clientId || !redirectUri) {
+    console.error('ENV faltando em /ml/connect', { clientId: !!clientId, redirectUri: !!redirectUri });
+    return res.status(500).send('⚠️ Defina ML_CLIENT_ID e ML_REDIRECT_URI nas variáveis do Render.');
+  }
+
   const auth = new URL('https://auth.mercadolibre.com.br/authorization');
   auth.searchParams.set('response_type', 'code');
-  auth.searchParams.set('client_id', process.env.ML_CLIENT_ID);
-  auth.searchParams.set('redirect_uri', process.env.ML_REDIRECT_URI);
+  auth.searchParams.set('client_id', clientId);
+  auth.searchParams.set('redirect_uri', redirectUri);
+
+  console.log('🔗 Redirecionando para OAuth:', auth.toString());
   res.redirect(auth.toString());
 });
 
@@ -113,16 +122,45 @@ app.get('/ml/callback', async (req, res) => {
     }).then(r => r.json());
 
     if (!tok.access_token) {
+      console.error('OAuth token error:', tok);
       return res.status(400).send('Falha ao obter access_token do ML');
     }
 
-    // quem é o usuário conectado
     const me = await fetch('https://api.mercadolibre.com/users/me', {
       headers: { 'Authorization': `Bearer ${tok.access_token}` }
     }).then(r => r.json());
 
-    // salva/atualiza tokens
+    // garante tabela shops (caso não tenha criado)
+    await pool.query(`
+      create table if not exists shops (
+        id bigserial primary key,
+        ml_user_id bigint unique not null,
+        nickname text,
+        created_at timestamptz default now()
+      );
+    `);
+
+    await pool.query(`
+      create table if not exists tokens (
+        ml_user_id bigint primary key,
+        access_token text not null,
+        refresh_token text not null,
+        expires_at timestamptz not null,
+        updated_at timestamptz default now()
+      );
+    `);
+
+    await pool.query(`
+      create table if not exists answers (
+        question_id bigint primary key,
+        final text,
+        mode text check (mode in ('auto','manual')),
+        answered_at timestamptz
+      );
+    `);
+
     const expiresAt = new Date(Date.now() + (tok.expires_in || 21600) * 1000);
+
     await pool.query(`
       insert into shops (ml_user_id, nickname) values ($1, $2)
       on conflict (ml_user_id) do update set nickname = excluded.nickname
@@ -145,7 +183,7 @@ app.get('/ml/callback', async (req, res) => {
   }
 });
 
-// ------------- Webhook ---------------------
+// ========= Webhook =========
 app.post('/ml/webhook', async (req, res) => {
   try {
     const payload = req.body || {};
@@ -153,14 +191,11 @@ app.post('/ml/webhook', async (req, res) => {
     const resource = payload.resource;
     const user_id = payload.user_id;
 
-    // Aceita tanto 'marketplace_questions' quanto 'questions'
     const isQuestions =
       (topic && topic.toLowerCase().includes('questions')) &&
       resource && resource.includes('/questions/');
 
-    if (!isQuestions) {
-      return res.sendStatus(200);
-    }
+    if (!isQuestions) return res.sendStatus(200);
 
     const qId = resource.split('/').pop();
 
@@ -194,11 +229,11 @@ app.post('/ml/webhook', async (req, res) => {
     res.sendStatus(200);
   } catch (e) {
     console.error('Webhook error:', e);
-    res.sendStatus(200); // não re-tenta indefinidamente
+    res.sendStatus(200);
   }
 });
 
-// ------------- Hugging Face ---------------
+// ========= Hugging Face =========
 async function generateAI(ctx) {
   const system = `Você é atendente no Mercado Livre.
 - Responda em PT-BR, curto (1–2 frases).
@@ -218,7 +253,10 @@ Pergunta: ${ctx.question}`;
       'Authorization': `Bearer ${process.env.HF_TOKEN}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ inputs: prompt, parameters: { max_new_tokens: 120, temperature: 0.6, return_full_text: false } })
+    body: JSON.stringify({
+      inputs: prompt,
+      parameters: { max_new_tokens: 120, temperature: 0.6, return_full_text: false }
+    })
   });
 
   let data;
@@ -233,6 +271,6 @@ Pergunta: ${ctx.question}`;
     .slice(0, 900);
 }
 
-// ------------- Start -----------------------
+// ========= Start =========
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`on ${PORT}`));
