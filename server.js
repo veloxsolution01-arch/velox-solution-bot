@@ -26,12 +26,14 @@ async function mlFetch(url, token, opts = {}) {
 
 // OAuth - iniciar conexão
 app.get('/ml/connect', (req, res) => {
-  const auth = new URL('https://auth.mercadolibre.com.br/authorization');
-  auth.searchParams.set('response_type', 'code');
+  const auth = new URL('https://auth.mercadolivre.com.br/authorization'); // <- VRE
+  auth.searchParams.set('response_type','code');
   auth.searchParams.set('client_id', process.env.ML_CLIENT_ID);
   auth.searchParams.set('redirect_uri', process.env.ML_REDIRECT_URI);
+  console.log('🔗 OAuth URL:', auth.toString());
   res.redirect(auth.toString());
 });
+
 
 // OAuth - callback
 app.get('/ml/callback', async (req, res) => {
@@ -143,3 +145,4 @@ Responda curto (1–2 frases), sem oferecer contato fora do ML.`;
 app.listen(process.env.PORT || 3000, () => {
   console.log("🚀 Server rodando na porta", process.env.PORT || 3000);
 });
+
